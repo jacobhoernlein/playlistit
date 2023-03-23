@@ -1,184 +1,95 @@
-"""A handler for Spotify API using AIOHTTP and spotipy's OAuth"""
-
-import re
-import string as stringlib
-import asyncio
-import aiohttp
-import urllib.parse
-import difflib
+from difflib import get_close_matches
+from string import punctuation
 
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
 
-class SpotifyHandler():
-    """Class with functions that create playlists"""
 
-    def __init__(self):
-        self.auth = SpotifyOAuth(scope="user-library-read playlist-modify-public")
-        self.access_token:function = lambda : self.auth.get_access_token(as_dict=False)
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
-        sp = spotipy.Spotify(auth_manager=self.auth)
-        self.USER_ID = sp.me()['id']
+def simplify_string(s: str) -> str:
+    """Removes punctuation and capitalization from given string."""
 
-    ### API FUNCTIONS ###
+    return s.lower().translate(str.maketrans('', '', punctuation))
 
-    async def create_playlist(self, aiosession:aiohttp.ClientSession, name:str, description:str) -> dict:
-        """Creates a public playlist on the Bot's account and returns the object"""
-        async with aiosession.post(
-            f"https://api.spotify.com/v1/users/{self.USER_ID}/playlists",
-            headers={
-                "Authorization": f"Bearer {self.access_token()}"
-            },
-            json={
-                "name": name,
-                "description": description,
-                "public": True
+def get_best_match(sp: spotipy.Spotify, words: list[str]) -> tuple[dict | None, list[str]]:
+    """Uses the Spotify class to find a song that best applies to the
+    list of words passed. Returns the track dict, and the new words
+    list.
+    """
+ 
+    working_words = words[0:5]
+    while working_words:
+
+        # Join the current list of words into a sentence.
+        query = ' '.join(working_words)
+
+        # Get a list of tracks based on the query.
+        tracks = sp.search(query, limit=50, type='track')['tracks']['items']
+
+        # Look for an exact match. If one is found,
+        # edit original words list and return the id.
+        for track in tracks:
+            name = simplify_string(track['name'])
+            if name == query:
+                return track, words[len(working_words):]
+
+        # If an exact match isn't found, and only one word is left,
+        # look for best match.
+        if len(working_words) == 1:
+            name_to_track = {
+                track['name']: track
+                for track in tracks
             }
-        ) as resp:
-            response_json = await resp.json()
-            return response_json
 
-    async def add_songs_to_playlist(self, aiosession:aiohttp.ClientSession, playlist:dict, tracks:list[dict]):
-        """Adds the tracks to the playlist. MUST pass a list of tracks."""
-        async with aiosession.post(
-            f"https://api.spotify.com/v1/playlists/{playlist['id']}/tracks",
-            headers={
-                "Authorization": f"Bearer {self.access_token()}"
-            },
-            json={
-                "uris": [track['uri'] for track in tracks]
-            }
-        ) as resp:
-            response_json = await resp.json()
-            return response_json
+            matches = get_close_matches(working_words[0], list(name_to_track))
+            if matches:
+                return name_to_track[matches[0]], words[1:]
+            else:
+                return None, words[1:]
 
-    async def search(self, aiosession:aiohttp.ClientSession, query:str, type:str, limit:int=50, offset:int=0) -> dict:
-        """Searches spotify and returns the dictionary that results"""
-        query = urllib.parse.quote(query)
-        url = f"https://api.spotify.com/v1/search?q={query}&type={type}&limit={limit}"
-        if offset > 0:
-            url += f"&offset={offset}"
+        # If match isn't found, remove last word and try again.
+        working_words.pop()
 
-        async with aiosession.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.access_token()}"
-            }
-        ) as resp:
-            response_json = await resp.json()
-            return response_json
+    return None, words[1:]
 
-    ### INTERNAL FUNCTIONS ###
+def get_song_ids(sp: spotipy.Spotify, description: str) -> list[int | None]:
+    """Gets a list of Spotify Track IDs that spell out the passed
+    description.
+    """
 
-    async def add_songs_by_sentence(self, aiosession:aiohttp.ClientSession, sentence:str, playlist:dict):
-        """Adds the sentence to the given playlist"""
+    words = simplify_string(description).split()
+    track_ids = []
 
-        # Removes punctuation and capitalization, then splits the words into a list
-        words = sentence.lower().translate(str.maketrans('', '', stringlib.punctuation)).split()
-        while words:
-            found = False
+    while words:
+        track, words = get_best_match(sp, words)
+        if track is not None:
+            print(f" - {track['name']} by {track['artists'][0]['name']}")
+            track_ids.append(track['id'])
 
-            # Will create a query for each word
-            for i in range(len(words)):
-
-                # Adds every word after the first word
-                # Then every word but last
-                # And so on
-                search = ""
-                for j in range(len(words) - i):
-                    search += words[j]
-                    if j < (len(words) - i - 1):
-                        search += " "
-                
-                # Conducts search, adds tracks from each page to the list
-                searchtracks = []
-                for page in range(5):
-                    pageresults = await self.search(aiosession, search, type="track", limit=50, offset=(50 * page))
-                    if not pageresults['tracks']['items']:
-                        break            
-                    for track in pageresults['tracks']['items']:
-                        searchtracks.append(track)
-
-                found = False
-                search_words = search.split()
-
-                # Checks each track to see if it matches the search string
-                for track in searchtracks:
-                    title_words = track['name'].lower().split()
-
-                    if title_words == search_words:
-                        print(f"{track['name']} by {track['artists'][0]['name']}")
-                        await self.add_songs_to_playlist(aiosession, playlist, [track])
-                        
-                        found = True
-                        break
-                
-                # If it's one word, it attempts to find the closest match
-                if not found and len(search_words) == 1:
-                    
-                    trackdict = {}
-                    for track in searchtracks:
-                        trackdict[track['name']] = track
-                    
-                    potentialmatches = difflib.get_close_matches(search_words[0], list(trackdict.keys()))
-                    
-                    if len(potentialmatches) != 0:
-                        track = trackdict[potentialmatches[0]]
-                        print(f"{track['name']} by {track['artists'][0]['name']}")
-                        await self.add_songs_to_playlist(aiosession, playlist, [track])
-                        found = True
-
-                # If it found a result, it removes the words from the list
-                if found:
-                    for j in range(len(search_words)):
-                        words.pop(0)
-                    break
-            
-            # If after everything, it didn't find anything, it removes the word.
-            if not found:
-                words.pop(0)
-
-    async def make_playlist_from_string(self, aiosession:aiohttp.ClientSession, inputstring:str, name:str) -> str:
-        """Makes a playlist from the given string with the given name and returns the URL"""
-        
-        # Splits the string by sentence to make it easier to work with
-        sentences = []
-        for sentence in re.split("[.?!(),]", inputstring):
-            sentence = sentence.strip()
-            if sentence != '':
-                sentences.append(sentence)
-
-        # Calls Spotify's API to make a playlist
-        try:
-            playlist = await self.create_playlist(
-                aiosession=aiosession,
-                name=name,
-                description=f"\"{inputstring}\""
-            )
-        except:
-            print("ERROR CREATING PLAYLIST")
-            return None
-
-        # Goes sentence by sentence and adds songs to the playlist based on it
-        for sentence in sentences:
-            try:
-                await self.add_songs_by_sentence(
-                    aiosession=aiosession,
-                    sentence=sentence,
-                    playlist=playlist
-                )
-            except:
-                print("ERROR ADDING SONGS TO PLAYLIST")
-                return None
-
-        return playlist['external_urls']['spotify']
+    return track_ids
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
 
-    string = input("Enter a sentence to make a playlist out of:\n")
-    title = input("Enter a title for the playlist:\n")
+    scope = 'user-library-read playlist-modify-public'
+    
+    try:
+        auth = spotipy.oauth2.SpotifyOAuth(scope=scope)
+    except spotipy.oauth2.SpotifyOauthError:
+        print("Authorization failed. Make sure SPOTIFY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, and SPOTIPY_REDIRECT_URI environment variables are set. See https://www.youtube.com/watch?v=3RGm4jALukM for more info.")
+        exit(1)
+    
+    sp = spotipy.Spotify(auth_manager=auth)
+    user_id = sp.me()['id']
 
-    client = SpotifyHandler()
-    url = asyncio.run(client.make_playlist_from_string(string, title))
-    print(url)
+    name = input("Enter a title for the playlist:\n")
+    description = input("Enter a sentence to make a playlist out of:\n")
+
+    playlist = sp.user_playlist_create(user_id, name, description=description)
+    tracks = get_song_ids(sp, description)
+    sp.playlist_add_items(playlist['id'], tracks)
+    print(f"Here's your playlist:\n{playlist['external_urls']['spotify']}")

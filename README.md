@@ -1,5 +1,3 @@
 # Playlist It!
 
-A Twitter bot that takes the content of Tweets and makes Spotify playlists based on them, then returns a link to the user that requested it.
-
-NOTE: This code is VERY old and VERY inefficient. I might update it later, but it's a cool proof-of-concept.
+A Python script that makes a spotify playlist out of a string. There used to be a twitter bot component to this but it is very old and just completely doesnt work if you try to use it. To use the Spotify script, make sure you have the proper environment variables set up.
